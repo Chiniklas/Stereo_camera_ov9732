@@ -47,7 +47,7 @@ DIY stereo camera test environment (dual OV9732 modules on a 3D-printed holder).
 ## Stereo calibration
 - Start the interactive calibration capture (uses the same resilient reader as two-stream):
   ```bash
-  python -m tests.camera_calibration \
+  python tests/camera_calibration.py \
     --left-config ov9732_L --right-config ov9732_R \
     --square-size-mm 25 --board-cols 8 --board-rows 6 \
     --frames 50 --flip vertical
@@ -67,6 +67,18 @@ DIY stereo camera test environment (dual OV9732 modules on a 3D-printed holder).
   ```
 - Shows disparity (and optional RGB on top). Reports median depth in the center ROI; exits non-zero if relative error exceeds tolerance.
 - If depth is far off: recheck printed square size, baseline rigidity, or recalibrate.
+
+## Live stereo depth preview
+- Visualize rectified RGB (top) and real-time disparity (bottom) using your saved calibration:
+  ```bash
+  python tests/capture_stereo_stream.py \
+    --calib tests/calibration/jetson_stereo.npz \
+    --left-config ov9732_L --right-config ov9732_R \
+    --flip vertical --preview-scale 0.7 \
+    --num-disp 160 --block-size 7 --uniqueness 15 \
+    --speckle-window 200 --speckle-range 4 --median --clahe
+  ```
+- Tune SGBM with `--num-disp`, `--block-size`, `--uniqueness`, `--speckle-window`, `--speckle-range`; add `--median` and `--clahe` to denoise/boost contrast. Press `q` to quit.
 
 ## Notes
 - Defaults target MJPG @ 1280x720 @ 30 fps.

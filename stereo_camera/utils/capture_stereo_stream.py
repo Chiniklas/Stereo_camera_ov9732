@@ -1,18 +1,4 @@
-"""
-Live stereo preview with rectified RGB and depth (disparity) view.
-
-Loads a saved calibration (.npz), opens both cameras, rectifies frames,
-computes disparity with StereoSGBM, and shows a stacked window:
-top = rectified RGB (L|R), bottom = disparity heatmap.
-
-Usage:
-    python -m stereo_camera.utils.capture_stereo_stream \
-        --calib tests/calibration/jetson_stereo.npz \
-        --left-config ov9732_L --right-config ov9732_R \
-        --flip vertical --preview-scale 0.7
-
-Press 'q' to quit.
-"""
+"""Live stereo preview: rectified RGB (top) + disparity heatmap (bottom)."""
 
 from __future__ import annotations
 
@@ -73,24 +59,35 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main() -> int:
-    args = parse_args()
-    calib_path = Path(args.calib)
-    if not calib_path.exists():
-        print(f"Calibration file not found: {calib_path}", file=sys.stderr)
-        return 2
-
+def run(
+    *,
+    calib_path: Path,
+    left_config: str,
+    right_config: str,
+    flip: str = "vertical",
+    max_fails: int = 5,
+    reconnect_wait: float = 1.0,
+    preview_scale: float = 0.7,
+    min_disp: int = 0,
+    num_disp: int = 128,
+    block_size: int = 5,
+    uniqueness: int = 12,
+    speckle_window: int = 80,
+    speckle_range: int = 2,
+    median: bool = False,
+    clahe: bool = False,
+) -> int:
     data = np.load(calib_path)
     k1, d1, k2, d2, R, T = (data[x] for x in ("k1", "d1", "k2", "d2", "R", "T"))
 
-    camL = Ov9732Camera.from_config(args.left_config)
-    camR = Ov9732Camera.from_config(args.right_config)
-    reader = DualCameraReader([camL, camR], flip=args.flip, max_fails=args.max_fails, reconnect_wait=args.reconnect_wait)
+    camL = Ov9732Camera.from_config(left_config)
+    camR = Ov9732Camera.from_config(right_config)
+    reader = DualCameraReader([camL, camR], flip=flip, max_fails=max_fails, reconnect_wait=reconnect_wait)
     reader.labels = ["L", "R"]
     reader.start()
 
     try:
-        # Prime one frame to get size
+        # Prime size
         while True:
             pair = reader.read_pair()
             if pair is None:
@@ -102,18 +99,17 @@ def main() -> int:
         R1, R2, P1, P2, Q, _, _ = cv2.stereoRectify(k1, d1, k2, d2, (w, h), R, T)
         map1x, map1y = cv2.initUndistortRectifyMap(k1, d1, R1, P1, (w, h), cv2.CV_32FC1)
         map2x, map2y = cv2.initUndistortRectifyMap(k2, d2, R2, P2, (w, h), cv2.CV_32FC1)
-        # Ensure num_disp divisible by 16 and block_size odd
-        num_disp = (max(1, args.num_disp // 16)) * 16
-        block_size = args.block_size if args.block_size % 2 == 1 else args.block_size + 1
+        num_disp = (max(1, num_disp // 16)) * 16
+        block_size = block_size if block_size % 2 == 1 else block_size + 1
         sgbm = build_sgbm(
-            min_disp=args.min_disp,
+            min_disp=min_disp,
             num_disp=num_disp,
             block_size=block_size,
-            uniqueness=args.uniqueness,
-            speckle_window=args.speckle_window,
-            speckle_range=args.speckle_range,
+            uniqueness=uniqueness,
+            speckle_window=speckle_window,
+            speckle_range=speckle_range,
         )
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)) if args.clahe else None
+        clahe_op = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)) if clahe else None
 
         while True:
             pair = reader.read_pair()
@@ -127,19 +123,19 @@ def main() -> int:
 
             gray_l = cv2.cvtColor(l, cv2.COLOR_BGR2GRAY)
             gray_r = cv2.cvtColor(r, cv2.COLOR_BGR2GRAY)
-            if clahe is not None:
-                gray_l = clahe.apply(gray_l)
-                gray_r = clahe.apply(gray_r)
+            if clahe_op is not None:
+                gray_l = clahe_op.apply(gray_l)
+                gray_r = clahe_op.apply(gray_r)
             disp = sgbm.compute(gray_l, gray_r).astype(np.float32) / 16.0
-            if args.median:
+            if median:
                 disp = cv2.medianBlur(disp, 3)
 
             disp_vis = cv2.normalize(disp, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             disp_vis = cv2.applyColorMap(disp_vis, cv2.COLORMAP_JET)
 
             rgb_pair = cv2.hconcat([l, r])
-            if args.preview_scale != 1.0:
-                rgb_pair = cv2.resize(rgb_pair, None, fx=args.preview_scale, fy=args.preview_scale, interpolation=cv2.INTER_AREA)
+            if preview_scale != 1.0:
+                rgb_pair = cv2.resize(rgb_pair, None, fx=preview_scale, fy=preview_scale, interpolation=cv2.INTER_AREA)
                 disp_vis = cv2.resize(disp_vis, (rgb_pair.shape[1], rgb_pair.shape[0]))
 
             composite = cv2.vconcat([rgb_pair, disp_vis])
@@ -152,6 +148,32 @@ def main() -> int:
 
     finally:
         reader.stop()
+
+
+def main() -> int:
+    args = parse_args()
+    calib_path = Path(args.calib)
+    if not calib_path.exists():
+        print(f"Calibration file not found: {calib_path}", file=sys.stderr)
+        return 2
+
+    return run(
+        calib_path=calib_path,
+        left_config=args.left_config,
+        right_config=args.right_config,
+        flip=args.flip,
+        max_fails=args.max_fails,
+        reconnect_wait=args.reconnect_wait,
+        preview_scale=args.preview_scale,
+        min_disp=args.min_disp,
+        num_disp=args.num_disp,
+        block_size=args.block_size,
+        uniqueness=args.uniqueness,
+        speckle_window=args.speckle_window,
+        speckle_range=args.speckle_range,
+        median=args.median,
+        clahe=args.clahe,
+    )
 
 
 if __name__ == "__main__":
