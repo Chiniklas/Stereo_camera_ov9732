@@ -15,6 +15,8 @@ import numpy as np
 from pathlib import Path
 from typing import Iterable, Tuple, List
 
+from stereo_camera.utils.capture_two_stream import DualCameraReader, FLIP_MAP
+
 
 class CameraInterface:
     """Minimal interface required from camera objects."""
@@ -43,6 +45,9 @@ def stereo_calibrate_camera(
     display_scale: float = 0.6,
     save_dir: str | Path = ".",
     fix_intrinsic: bool = True,
+    max_fails: int = 5,
+    reconnect_wait: float = 1.0,
+    flip: str = "vertical",
 ) -> Path:
     """
     Run stereo calibration on two cameras showing a chessboard.
@@ -53,6 +58,9 @@ def stereo_calibrate_camera(
 
     Returns path to the saved stereo .npz file.
     """
+    if flip not in FLIP_MAP:
+        raise ValueError("flip must be one of: none, vertical, horizontal, both")
+
     save_dir = Path(save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
     stereo_path = save_dir / f"{camera_name}.npz"
@@ -69,19 +77,21 @@ def stereo_calibrate_camera(
     frames_l: List[np.ndarray] = []
     frames_r: List[np.ndarray] = []
 
-    camera_left.start()
-    camera_right.start()
+    reader = DualCameraReader([camera_left, camera_right], flip=flip, max_fails=max_fails, reconnect_wait=reconnect_wait)
+    reader.labels = ["L", "R"]
+    reader.start()
 
     print("Align checkerboard; 'c' capture pair, 'x' abort.")
     captured = 0
+
     try:
         while captured < frames_to_capture:
-            ok_l, frame_l = camera_left.read()
-            ok_r, frame_r = camera_right.read()
-            if not ok_l or not ok_r:
-                print("Warning: failed to read from one camera; skipping frame.")
+            frames = reader.read_pair()
+            if frames is None:
                 cv2.waitKey(10)
                 continue
+
+            frame_l, frame_r = frames
 
             preview = cv2.hconcat(
                 [
@@ -101,6 +111,7 @@ def stereo_calibrate_camera(
                 return stereo_path
     finally:
         cv2.destroyAllWindows()
+        reader.stop()
 
     for img_l, img_r in zip(frames_l, frames_r):
         gray_l = cv2.cvtColor(img_l, cv2.COLOR_BGR2GRAY)

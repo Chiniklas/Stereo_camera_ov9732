@@ -18,6 +18,80 @@ import numpy as np
 from stereo_camera.cameras.ov9732_camera import Ov9732Camera, load_camera_config
 
 
+FLIP_MAP = {"none": None, "vertical": 0, "horizontal": 1, "both": -1}
+
+
+class DualCameraReader:
+    """
+    Shared resilient reader for two cameras with reopen/backoff logic.
+    This is the baseline used by both capture_two_stream and calibration flows.
+    """
+
+    def __init__(self, cams: Iterable[Ov9732Camera], *, flip: str = "vertical", max_fails: int = 5, reconnect_wait: float = 1.0):
+        cams = list(cams)
+        if len(cams) != 2:
+            raise ValueError("Exactly two camera instances are required")
+        if flip not in FLIP_MAP:
+            raise ValueError("flip must be one of: none, vertical, horizontal, both")
+
+        self.cams = cams
+        self.flip = flip
+        self.flip_code = FLIP_MAP[flip]
+        self.max_fails = max_fails
+        self.reconnect_wait = reconnect_wait
+
+        self.consecutive_failures = [0, 0]
+        self.backoff = [reconnect_wait, reconnect_wait]
+        self.labels = ["L", "R"]
+
+    def start(self):
+        for cam in self.cams:
+            cam.start()
+        return self
+
+    def stop(self):
+        for cam in self.cams:
+            try:
+                cam.stop()
+                cam.release()
+            except Exception:
+                pass
+
+    def read_pair(self):
+        frames = []
+        for idx, cam in enumerate(self.cams):
+            ok, frame = cam.read()
+            if not ok or frame is None:
+                self.consecutive_failures[idx] += 1
+                if self.consecutive_failures[idx] >= self.max_fails:
+                    logging.warning("[%s] Reopening after %d failures", self.labels[idx], self.consecutive_failures[idx])
+                    cam.release()
+                    time.sleep(self.backoff[idx])
+                    self.backoff[idx] = min(self.backoff[idx] * 2, 30)
+                    try:
+                        cam.start()
+                        self.consecutive_failures[idx] = 0
+                        self.backoff[idx] = self.reconnect_wait
+                    except Exception as exc:  # noqa: BLE001
+                        logging.error("[%s] Reopen failed: %s", self.labels[idx], exc)
+                return None
+
+            self.consecutive_failures[idx] = 0
+            if self.flip_code is not None:
+                frame = cv2.flip(frame, self.flip_code)
+            frames.append((idx, frame))
+
+        frames_sorted = [f for _, f in sorted(frames, key=lambda x: x[0])]
+        return frames_sorted
+
+    def log_stats(self):
+        for idx, cam in enumerate(self.cams):
+            try:
+                cam.log_stats(interval=0, label=self.labels[idx])
+            except Exception:
+                pass
+
+
 def capture_two_stream(
     cams: Iterable[Ov9732Camera],
     *,
@@ -34,8 +108,7 @@ def capture_two_stream(
     preview_scale: float = 0.5,
 ):
     cams = list(cams)
-    if len(cams) != 2:
-        raise ValueError("Exactly two camera instances are required")
+    reader = DualCameraReader(cams, flip=flip, max_fails=max_fails, reconnect_wait=reconnect_wait)
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -50,9 +123,8 @@ def capture_two_stream(
     # writers and segment timers
     writers: List[cv2.VideoWriter | None] = [None, None]
     segment_start = [time.monotonic(), time.monotonic()]
-    backoff = [reconnect_wait, reconnect_wait]
-    consecutive_failures = [0, 0]
     labels = ["L", "R"]
+    reader.labels = labels  # preserve existing labels
 
     def open_writer(idx: int, seq: int) -> cv2.VideoWriter | None:
         cam = cams[idx]
@@ -68,13 +140,13 @@ def capture_two_stream(
         return writer
 
     # Start cameras
-    for idx, cam in enumerate(cams):
-        try:
-            cam.start()
-        except Exception as exc:
-            logging.error("[%s] Could not open camera: %s", labels[idx], exc)
-            return 1
-        if save:
+    try:
+        reader.start()
+    except Exception as exc:
+        logging.error("Could not open cameras: %s", exc)
+        return 1
+    if save:
+        for idx in range(len(cams)):
             writers[idx] = open_writer(idx, 0)
             if writers[idx] is None:
                 return 1
@@ -84,34 +156,14 @@ def capture_two_stream(
     stop = False
 
     while not stop:
-        frames = []
         now = time.monotonic()
-        for idx, cam in enumerate(cams):
-            ok, frame = cam.read()
-            if not ok or frame is None:
-                consecutive_failures[idx] += 1
-                logging.warning(
-                    "[%s] Frame read failed (consecutive=%d)", labels[idx], consecutive_failures[idx]
-                )
-                if consecutive_failures[idx] >= max_fails:
-                    logging.warning("[%s] Reopening after failures", labels[idx])
-                    cam.release()
-                    time.sleep(backoff[idx])
-                    backoff[idx] = min(backoff[idx] * 2, 30)
-                    try:
-                        cam.start()
-                        consecutive_failures[idx] = 0
-                        backoff[idx] = reconnect_wait
-                    except Exception as exc:
-                        logging.error("[%s] Reopen failed: %s", labels[idx], exc)
-                continue
+        frames_sorted = reader.read_pair()
+        if frames_sorted is None:
+            continue
 
-            consecutive_failures[idx] = 0
+        frame_l, frame_r = frames_sorted
 
-            if flip != "none":
-                flip_map = {"vertical": 0, "horizontal": 1, "both": -1}
-                frame = cv2.flip(frame, flip_map[flip])
-
+        for idx, frame in enumerate((frame_l, frame_r)):
             if save and writers[idx]:
                 writers[idx].write(frame)
 
@@ -123,18 +175,16 @@ def capture_two_stream(
                 writers[idx] = open_writer(idx, seq[idx])
                 segment_start[idx] = now
 
-            frames.append((idx, frame))
-
         # preview in main thread
-        if show and len(frames) == 2:
-            frames_sorted = [f for _, f in sorted(frames, key=lambda x: x[0])]
+        if show:
+            frames_for_preview = (frame_l, frame_r)
             if preview_scale != 1.0:
                 frames_scaled = [
                     cv2.resize(f, None, fx=preview_scale, fy=preview_scale, interpolation=cv2.INTER_AREA)
-                    for f in frames_sorted
+                    for f in frames_for_preview
                 ]
             else:
-                frames_scaled = frames_sorted
+                frames_scaled = frames_for_preview
             try:
                 composite = cv2.hconcat(frames_scaled)
                 cv2.imshow("preview L | R", composite)
@@ -144,21 +194,17 @@ def capture_two_stream(
                 logging.warning("Preview failed: %s", exc)
 
         if now - last_stats > stats_interval:
-            for idx, cam in enumerate(cams):
-                cam.log_stats(interval=0, label=labels[idx])  # force immediate log
+            reader.log_stats()
             last_stats = now
 
     # cleanup
-    for idx, cam in enumerate(cams):
-        try:
-            cam.release()
-        except Exception:
-            pass
+    for idx in range(len(cams)):
         if writers[idx]:
             try:
                 writers[idx].release()
             except Exception:
                 pass
+    reader.stop()
     if show:
         cv2.destroyAllWindows()
     return 0

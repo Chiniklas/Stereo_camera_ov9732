@@ -1,2 +1,5 @@
 reference/
 logs/
+stereo_camera.egg-info/
+*.pyc
+__pycache__/
