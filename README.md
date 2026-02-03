@@ -74,11 +74,9 @@ DIY stereo camera test environment (dual OV9732 modules on a 3D-printed holder).
   python tests/capture_stereo_stream.py \
     --calib tests/calibration/jetson_stereo.npz \
     --left-config ov9732_L --right-config ov9732_R \
-    --flip vertical --preview-scale 0.7 \
-    --num-disp 160 --block-size 7 --uniqueness 15 \
-    --speckle-window 200 --speckle-range 4 --median --clahe
+    --flip vertical --preview-scale 0.7
   ```
-- Tune SGBM with `--num-disp`, `--block-size`, `--uniqueness`, `--speckle-window`, `--speckle-range`; add `--median` and `--clahe` to denoise/boost contrast. Press `q` to quit.
+- Defaults now match the tuned profile: `--min-disp 0 --num-disp 96 --block-size 9 --uniqueness 22 --speckle-window 150 --speckle-range 1 --median --clahe --bilateral` (all filters on). Override any value; disable filters with `--no-median`, `--no-clahe`, or `--no-bilateral`. Press `q` to quit.
 
 ## Notes
 - Defaults target MJPG @ 1280x720 @ 30 fps.

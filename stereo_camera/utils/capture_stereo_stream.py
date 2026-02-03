@@ -49,13 +49,17 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--preview-scale", type=float, default=0.7, help="Scale factor for the displayed composite.")
     # SGBM tuning
     p.add_argument("--min-disp", type=int, default=0, help="Minimum disparity.")
-    p.add_argument("--num-disp", type=int, default=16 * 8, help="Number of disparities (must be divisible by 16).")
-    p.add_argument("--block-size", type=int, default=5, help="SGBM block size (odd, 3-11 typical).")
-    p.add_argument("--uniqueness", type=int, default=12, help="Uniqueness ratio (higher = stricter).")
-    p.add_argument("--speckle-window", type=int, default=80, help="Speckle window size for post-filtering.")
-    p.add_argument("--speckle-range", type=int, default=2, help="Speckle range for post-filtering.")
-    p.add_argument("--median", action="store_true", help="Apply 3x3 median blur to disparity for visualization.")
-    p.add_argument("--clahe", action="store_true", help="Apply CLAHE to grayscale before matching (helps low contrast).")
+    p.add_argument("--num-disp", type=int, default=96, help="Number of disparities (must be divisible by 16).")
+    p.add_argument("--block-size", type=int, default=9, help="SGBM block size (odd, 3-11 typical).")
+    p.add_argument("--uniqueness", type=int, default=22, help="Uniqueness ratio (higher = stricter).")
+    p.add_argument("--speckle-window", type=int, default=150, help="Speckle window size for post-filtering.")
+    p.add_argument("--speckle-range", type=int, default=1, help="Speckle range for post-filtering.")
+    p.add_argument("--median", dest="median", action="store_true", default=True, help="Apply 3x3 median blur to disparity for visualization (default on).")
+    p.add_argument("--no-median", dest="median", action="store_false", help="Disable median blur.")
+    p.add_argument("--clahe", dest="clahe", action="store_true", default=True, help="Apply CLAHE to grayscale before matching (default on).")
+    p.add_argument("--no-clahe", dest="clahe", action="store_false", help="Disable CLAHE.")
+    p.add_argument("--bilateral", dest="bilateral", action="store_true", default=True, help="Apply bilateral filter to disparity before visualization (default on).")
+    p.add_argument("--no-bilateral", dest="bilateral", action="store_false", help="Disable bilateral filter.")
     return p.parse_args()
 
 
@@ -69,13 +73,14 @@ def run(
     reconnect_wait: float = 1.0,
     preview_scale: float = 0.7,
     min_disp: int = 0,
-    num_disp: int = 128,
-    block_size: int = 5,
-    uniqueness: int = 12,
-    speckle_window: int = 80,
-    speckle_range: int = 2,
-    median: bool = False,
-    clahe: bool = False,
+    num_disp: int = 96,
+    block_size: int = 9,
+    uniqueness: int = 22,
+    speckle_window: int = 150,
+    speckle_range: int = 1,
+    median: bool = True,
+    clahe: bool = True,
+    bilateral: bool = True,
 ) -> int:
     data = np.load(calib_path)
     k1, d1, k2, d2, R, T = (data[x] for x in ("k1", "d1", "k2", "d2", "R", "T"))
@@ -129,6 +134,9 @@ def run(
             disp = sgbm.compute(gray_l, gray_r).astype(np.float32) / 16.0
             if median:
                 disp = cv2.medianBlur(disp, 3)
+            if bilateral:
+                # Bilateral smooths speckle while keeping strong edges.
+                disp = cv2.bilateralFilter(disp, 7, 25, 7)
 
             disp_vis = cv2.normalize(disp, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
             disp_vis = cv2.applyColorMap(disp_vis, cv2.COLORMAP_JET)
@@ -173,6 +181,7 @@ def main() -> int:
         speckle_range=args.speckle_range,
         median=args.median,
         clahe=args.clahe,
+        bilateral=args.bilateral,
     )
 
 
